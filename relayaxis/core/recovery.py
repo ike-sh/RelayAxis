@@ -136,6 +136,7 @@ class Backups:
                     for b in r["bindings"]
                 )
                 for r in objects["rule"]
+                if not r.get("deleted")
             ) or any(s["tunnel_id"] not in tunnel_ids for s in objects["server"]):
                 raise ValidationError("备份对象引用不完整")
             from .rules import RuleManager

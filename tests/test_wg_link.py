@@ -33,7 +33,10 @@ class KernelRunner(FakeRunner):
                 }
             )
         if argv[:3] == ["ip", "link", "set"]:
-            self.links[0]["flags"] = ["UP"]
+            if "alias" in argv:
+                self.links[0]["ifalias"] = argv[argv.index("alias") + 1]
+            if "up" in argv:
+                self.links[0]["flags"] = ["UP"]
         if argv[:3] == ["ip", "link", "delete"]:
             self.links = []
         if argv[:2] == ["wg", "setconf"]:

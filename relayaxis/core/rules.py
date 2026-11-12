@@ -24,6 +24,8 @@ class RuleManager:
         return self.store.get("rule", rule_id)
 
     def _validate_graph(self, rule, db):
+        if rule.deleted:
+            return
         self.store.get("egress", rule.egress_id, db)
         existing = [
             Rule.from_dict(r)

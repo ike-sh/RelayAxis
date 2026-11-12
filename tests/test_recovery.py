@@ -38,6 +38,15 @@ class BackupTests(unittest.TestCase):
             self.lab.store.runtime("rule:" + newer["rule_id"])["state"], "PENDING_SYNC"
         )
 
+    def test_deleted_history_does_not_require_resources_already_removed(self):
+        rule = self.lab.rule()
+        self.lab.rules.delete(rule["rule_id"])
+        self.lab.store.remove("egress", "line-a")
+        backup = self.backups.create()
+        result = self.backups.restore(backup["backup"])
+        self.assertTrue(result["restored_desired_state"])
+        self.assertTrue(self.lab.rules.get(rule["rule_id"])["deleted"])
+
     def test_archive_path_traversal_links_and_duplicate_members_rejected(self):
         for variant in ("../outside", "/root/outside", "symlink", "duplicate"):
             path = Path(self.temp.name) / "bad.tar.gz"

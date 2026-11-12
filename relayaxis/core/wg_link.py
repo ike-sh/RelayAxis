@@ -65,6 +65,12 @@ class WireGuardLink:
                 ["ip", "link", "add", "dev", device, "alias", alias, "type", "wireguard"]
             )
             created = True
+            # Some kernel/link implementations do not retain IFLA_IFALIAS from
+            # RTM_NEWLINK. Set it explicitly and verify before installing keys.
+            self.runner.run(["ip", "link", "set", "dev", device, "alias", alias])
+            ownership = self._links(device)
+            if not ownership or ownership[0].get("ifalias") != alias:
+                raise ApplyError("内核没有保存 WG 所有权标记，拒绝继续安装密钥")
             self.runner.run(["ip", "-4", "address", "add", local + "/32", "dev", device])
             self.runner.run(["wg", "setconf", device, "/dev/stdin"], input="\n".join(lines) + "\n")
             self.runner.run(["ip", "link", "set", "dev", device, "mtu", str(tunnel.mtu), "up"])

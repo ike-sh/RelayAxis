@@ -198,6 +198,9 @@ class WireGuard:
         identity = self.store.get("tunnel", tunnel_id)
         path = self.paths.config / "wireguard" / f"{identity['interface']}.conf"
         tunnel, private = load_config(path.read_text(encoding="utf-8"), identity)
+        public = self.runner.run(["wg", "pubkey"], input=private + "\n").stdout.strip()
+        if public != identity["public_key"]:
+            raise ValidationError("受管 WG 私钥与登记公钥不匹配，拒绝启动")
         return WireGuardLink(self.runner, self.store).up(tunnel, private)
 
     def deactivate(self, tunnel_id):
