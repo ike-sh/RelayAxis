@@ -1,6 +1,7 @@
 """Native WG lifecycle: fixed argv, private key on stdin, no shell or wg-quick hooks."""
 
 import ipaddress
+import json
 
 from ..errors import ApplyError, ConflictError
 from ..models import identifier, new_id
@@ -11,7 +12,7 @@ class WireGuardLink:
         self.runner, self.store = runner, store
 
     def _links(self, device):
-        links = self.runner.json(["ip", "-j", "link", "show"])
+        links = self.runner.json(["ip", "-j", "-d", "link", "show"])
         return [link for link in links if link["ifname"] == device]
 
     def down(self, tunnel_id, device):
@@ -72,7 +73,14 @@ class WireGuardLink:
             )
             link = self._links(device)
             if not link or link[0].get("ifalias") != alias or "UP" not in link[0].get("flags", []):
-                raise ApplyError("WG 创建后接口/所有权健康检查失败")
+                details = json.dumps(
+                    [
+                        {k: v.get(k) for k in ("ifname", "ifalias", "flags", "linkinfo")}
+                        for v in link
+                    ],
+                    ensure_ascii=False,
+                )
+                raise ApplyError("WG 创建后接口/所有权健康检查失败: " + details)
         except Exception as exc:
             if created:
                 try:

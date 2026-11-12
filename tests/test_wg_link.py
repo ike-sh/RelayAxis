@@ -22,7 +22,7 @@ class KernelRunner(FakeRunner):
         self.calls.append(list(argv))
         from relayaxis.core.system import Result
 
-        if argv == ["ip", "-j", "link", "show"]:
+        if argv == ["ip", "-j", "-d", "link", "show"]:
             return Result(stdout=json.dumps(self.links))
         if argv[:3] == ["ip", "link", "add"]:
             self.links.append(
