@@ -46,7 +46,7 @@ class App:
 
     def settings(self):
         path = self.paths.config / "settings.json"
-        data = json.loads(path.read_text()) if path.exists() else {}
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
         if data and data.get("schema") != 1:
             raise ValidationError("配置 schema 不受此版本支持，拒绝覆盖或降级")
         return data
@@ -111,9 +111,7 @@ class App:
     def verify_install(self):
         env = environment()
         missing = [
-            name
-            for name in ("ip", "ss", "wg", "wg-quick", "ssh", "systemctl")
-            if not env["tools"][name]
+            name for name in ("ip", "ss", "wg", "ssh", "systemctl") if not env["tools"][name]
         ]
         realm = self.store.runtime("realm-binary", "/usr/local/bin/realm")
         if not Path(realm).is_file() and not shutil.which(realm):

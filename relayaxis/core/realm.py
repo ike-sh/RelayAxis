@@ -264,10 +264,9 @@ def scan_existing(runner, directories=None):
             seen.add(unit.name)
             try:
                 # systemctl cat includes drop-ins, unlike reading just the main file.
-                content = (
-                    runner.run(["systemctl", "cat", unit.name], check=False).stdout
-                    or unit.read_text()
-                )
+                content = runner.run(
+                    ["systemctl", "cat", unit.name], check=False
+                ).stdout or unit.read_text(encoding="utf-8")
                 for line in content.splitlines():
                     if not line.strip().startswith("ExecStart="):
                         continue

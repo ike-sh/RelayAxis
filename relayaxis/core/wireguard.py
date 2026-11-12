@@ -9,6 +9,7 @@ from ..models import Tunnel, identifier
 from ..storage import canonical
 from .resources import ResourceFiles
 from .system import atomic_write, file_lock
+from .wg_link import WireGuardLink, load_config
 
 
 def validate_key(key):
@@ -193,6 +194,16 @@ class WireGuard:
             tunnel = accept_pairing(Tunnel(**old), bundle)
             return self.store.put("tunnel", tunnel_id, asdict(tunnel), old["revision"])
 
+    def activate(self, tunnel_id):
+        identity = self.store.get("tunnel", tunnel_id)
+        path = self.paths.config / "wireguard" / f"{identity['interface']}.conf"
+        tunnel, private = load_config(path.read_text(encoding="utf-8"), identity)
+        return WireGuardLink(self.runner, self.store).up(tunnel, private)
+
+    def deactivate(self, tunnel_id):
+        identity = self.store.get("tunnel", tunnel_id)
+        return WireGuardLink(self.runner, self.store).down(tunnel_id, identity["interface"])
+
     def apply(self, tunnel_id, restart=False):
         self.runner.require_root()
         with file_lock(self.paths.state / "wg.lock"):
@@ -230,20 +241,13 @@ class WireGuard:
                         )
                     ):
                         raise ConflictError("WG peer 地址与现有物理网段重叠")
-            content = render(tunnel, self.key_path(tunnel_id).read_text().strip())
+            content = render(tunnel, self.key_path(tunnel_id).read_text(encoding="utf-8").strip())
             config = self.paths.config / "wireguard" / f"{tunnel.interface}.conf"
             unit_path = self.paths.units / unit
             prior = self.store.runtime("wg:" + tunnel_id, {})
             for path in (config, unit_path):
                 if path.is_symlink() or (path.exists() and not prior):
                     raise ConflictError("拒绝覆盖非受管 WG 文件")
-            if (
-                prior.get("revision") == tunnel.revision
-                and self.services.state(unit)["active"]
-                and not restart
-            ):
-                return {"state": "ACTIVE", "changed": False}
-            peer = str(ipaddress.ip_interface(tunnel.peer_address).ip)
             text = f"""# Managed by RelayAxis
 [Unit]
 Description=RelayAxis WireGuard {tunnel_id}
@@ -253,15 +257,23 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/bin/wg-quick up {config}
-ExecStartPost=/usr/sbin/ip -4 route add {peer}/32 dev {tunnel.interface} proto 186
-ExecStop=/usr/bin/wg-quick down {config}
-ExecStopPost=-/usr/bin/wg-quick down {config}
-ExecStopPost=-/usr/sbin/ip -4 route del {peer}/32 dev {tunnel.interface} proto 186
+ExecStart=/usr/local/bin/ra --json wg activate {tunnel_id}
+ExecStop=/usr/local/bin/ra --json wg deactivate {tunnel_id}
+ExecStopPost=-/usr/local/bin/ra --json wg deactivate {tunnel_id}
 
 [Install]
 WantedBy=multi-user.target
 """
+            if (
+                prior.get("revision") == tunnel.revision
+                and self.services.state(unit)["active"]
+                and not restart
+                and config.exists()
+                and config.read_text(encoding="utf-8") == content
+                and unit_path.exists()
+                and unit_path.read_text(encoding="utf-8") == text
+            ):
+                return {"state": "ACTIVE", "changed": False}
             resource = ResourceFiles(self.paths, self.store, self.services)
             state = self.services.state(unit)
             with resource.transaction(unit, [config, unit_path]) as transaction_id:

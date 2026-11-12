@@ -118,7 +118,7 @@ if ((!skip_deps)); then
     apt-get install -y --no-install-recommends python3 iproute2 wireguard-tools openssh-client iputils-ping ca-certificates
 fi
 if ((!staging)); then
-    for tool in ip ss wg wg-quick ssh systemctl; do
+    for tool in ip ss wg ssh systemctl; do
         command -v "$tool" >/dev/null || { echo "缺少依赖: $tool" >&2; exit 1; }
     done
 fi

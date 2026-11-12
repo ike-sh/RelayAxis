@@ -37,7 +37,7 @@ class Deployment:
             for path, content in expected.items():
                 if path.is_symlink():
                     raise ConflictError("受管配置被替换为符号链接")
-                if not path.exists() or path.read_text() != content:
+                if not path.exists() or path.read_text(encoding="utf-8") != content:
                     changed.add(endpoint.endpoint_id)
         return changed
 
@@ -91,7 +91,7 @@ class Deployment:
         reports = []
         with file_lock(self.paths.state / "deploy.lock"):
             for path in sorted((self.paths.state / "journals").glob("*.json")):
-                journal = json.loads(path.read_text())
+                journal = json.loads(path.read_text(encoding="utf-8"))
                 marker = self.store.runtime("deployment-commit:" + journal["id"], False)
                 if not marker:
                     self._restore(journal)

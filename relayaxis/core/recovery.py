@@ -4,6 +4,7 @@ import json
 import sqlite3
 import tarfile
 import tempfile
+from contextlib import closing
 from pathlib import Path, PurePosixPath
 
 from .. import __version__
@@ -117,7 +118,7 @@ class Backups:
         with tempfile.TemporaryDirectory() as temporary:
             db_path = Path(temporary) / "restore.sqlite3"
             db_path.write_bytes(files["state.sqlite3"])
-            with sqlite3.connect(db_path) as db:
+            with closing(sqlite3.connect(db_path)) as db:
                 if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                     raise ValidationError("备份数据库损坏")
             restored = Store(db_path)
@@ -219,7 +220,7 @@ class Backups:
         return {"exported": len(rules), "file": str(destination)}
 
     def import_rules(self, source, manager):
-        data = json.loads(Path(source).read_text())
+        data = json.loads(Path(source).read_text(encoding="utf-8"))
         payload = data["payload"]
         if (
             payload.get("schema") != 1

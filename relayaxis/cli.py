@@ -137,6 +137,8 @@ def parser():
             "restart",
             "delete",
             "status",
+            "activate",
+            "deactivate",
         ),
     )
     wg["allocate"].add_argument("--pool", default="10.203.0.0/16")
@@ -152,6 +154,8 @@ def parser():
         "restart",
         "delete",
         "status",
+        "activate",
+        "deactivate",
     ):
         wg[name].add_argument("tunnel_id")
     wg["pair"].add_argument("--replace-peer", action="store_true")
@@ -391,6 +395,9 @@ def dispatch(args, app):
         app.store.set_runtime("ipv6-labels", data)
         return data
     if cmd == "wg":
+        if action in ("activate", "deactivate"):
+            app.require_live()
+            return getattr(app.wg, action)(args.tunnel_id)
         if action == "list":
             return app.store.list("tunnel")
         if action == "allocate":
@@ -511,7 +518,7 @@ def dispatch(args, app):
         if action == "key-line":
             return {
                 "authorized_keys_line": authorized_key(
-                    args.public_key.read_text(), args.controller_address
+                    args.public_key.read_text(encoding="utf-8"), args.controller_address
                 )
             }
         if action == "status":
@@ -646,7 +653,7 @@ def dispatch(args, app):
         manifest = app.paths.state / "installation.json"
         if not manifest.is_file():
             raise ValidationError("未找到安装清单，请使用源码目录的安装/卸载脚本")
-        source = Path(json.loads(manifest.read_text())["source"])
+        source = Path(json.loads(manifest.read_text(encoding="utf-8"))["source"])
         if cmd == "update":
             source = args.source.resolve()
             return {

@@ -16,7 +16,7 @@ def receive(context, stream):
     if len(raw.encode()) > MAX_SNAPSHOT_BYTES:
         raise ValidationError("快照超过 4 MiB 限制")
     incoming = json.loads(raw)
-    policy = json.loads(policy_path.read_text())
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
     if isinstance(incoming, dict) and incoming.get("operation", "").startswith("mimic-"):
         if set(incoming) != {"operation"} or not policy.get("allow_mimic", False):
             raise ValidationError("未授权远程 Mimic 管理")

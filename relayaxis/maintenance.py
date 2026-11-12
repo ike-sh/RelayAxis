@@ -20,7 +20,7 @@ def _uninstall(paths, purge=False):
     manifest_path = paths.state / "installation.json"
     if not manifest_path.is_file():
         raise ValidationError("未找到安装清单，拒绝猜测或通配删除文件")
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     prefix = paths.root / "opt/relayaxis"
     if manifest["prefix"] != str(prefix) or not (prefix / ".relayaxis-owned").is_file():
         raise ConflictError("安装清单的程序目录不匹配")

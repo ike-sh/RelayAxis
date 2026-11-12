@@ -57,11 +57,13 @@ class BackupTests(unittest.TestCase):
                 self.backups.inspect(path)
 
     def test_rules_export_import_disabled(self):
-        self.lab.rule()
+        rule = self.lab.rule()
+        self.lab.rules.update(rule["rule_id"], {"name": "日本节点 / 香港节点"})
         destination = Path(self.temp.name) / "rules.json"
         self.backups.export_rules(destination)
         self.backups.import_rules(destination, self.lab.rules)
         self.assertFalse(self.lab.rules.list()[0]["enabled"])
+        self.assertEqual(self.lab.rules.list()[0]["name"], "日本节点 / 香港节点")
 
     def test_rule_export_checksum_failure_does_not_change_database(self):
         rule = self.lab.rule()

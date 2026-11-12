@@ -177,7 +177,7 @@ class Routing:
             if any(directory.glob("*.json")):
                 raise ApplyError("策略路由有未完成事务，请先 recovery repair")
             data = (
-                json.loads(self.config_path(egress_id).read_text())
+                json.loads(self.config_path(egress_id).read_text(encoding="utf-8"))
                 if from_config
                 else self.store.get("egress", egress_id)
             )
@@ -292,7 +292,7 @@ class Routing:
         reports = []
         with file_lock(self.paths.state / "pbr-activate.lock"):
             for path in sorted((self.paths.state / "routing-journals").glob("*.json")):
-                journal = json.loads(path.read_text())
+                journal = json.loads(path.read_text(encoding="utf-8"))
                 if not self.store.runtime("routing-commit:" + journal["id"]):
                     # Both undo an incomplete add and finish an incomplete delete.
                     for command in reversed(journal["commands"]):
@@ -329,7 +329,7 @@ class Routing:
             owned = self.store.runtime("pbr-unit:" + egress_id)
             if (unit_path.exists() or config.exists()) and not owned:
                 raise ConflictError("拒绝覆盖未登记的 PBR 配置或服务")
-            original = json.loads(config.read_text()) if config.exists() else {}
+            original = json.loads(config.read_text(encoding="utf-8")) if config.exists() else {}
             fields = ("interface", "source", "gateway", "table", "priority")
             same_network = original and all(
                 original.get(k) == asdict(egress).get(k) for k in fields

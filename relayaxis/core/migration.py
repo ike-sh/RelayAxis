@@ -43,10 +43,9 @@ class Migration:
                 raise ValidationError("必须先扫描并导入该服务，导入会创建备份")
             if hashlib.sha256(Path(record["config"]).read_bytes()).hexdigest() != record["sha256"]:
                 raise ConflictError("导入后原配置已变更，请重新检查；不会自动覆盖")
-            current_unit = (
-                app.runner.run(["systemctl", "cat", service], check=False).stdout
-                or Path(record["unit_path"]).read_text()
-            )
+            current_unit = app.runner.run(
+                ["systemctl", "cat", service], check=False
+            ).stdout or Path(record["unit_path"]).read_text(encoding="utf-8")
             if current_unit != record["unit_text"]:
                 raise ConflictError("导入后原服务或 drop-in 已变更，拒绝迁移")
             rules = [r for r in app.store.list("rule") if r.get("external_service") == service]
@@ -91,7 +90,7 @@ class Migration:
         with file_lock(self.app.paths.state / "migration.lock"):
             for path in sorted((self.app.paths.state / "migrations").glob("*.json")):
                 if not self.app.store.runtime("migration-commit:" + path.stem):
-                    self._restore(json.loads(path.read_text()))
+                    self._restore(json.loads(path.read_text(encoding="utf-8")))
                 path.unlink()
                 results.append(path.name)
         return results

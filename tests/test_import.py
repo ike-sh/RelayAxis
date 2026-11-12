@@ -1,3 +1,4 @@
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,7 +30,9 @@ through = "192.0.2.10"
 interface = "eth0"
 """)
         self.unit = self.directory / "realm-old.service"
-        self.unit.write_text(f"[Service]\nExecStart=/usr/local/bin/realm -c {self.config}\n")
+        self.unit.write_text(
+            f"[Service]\nExecStart=/usr/local/bin/realm -c {shlex.quote(str(self.config))}\n"
+        )
         self.runner = FakeRunner(
             {("systemctl", "is-active", "realm-old.service"): Result(stdout="active\n")}
         )

@@ -4,7 +4,7 @@
 
 `models.py` 校验对象；`storage.py` 保存期望配置/版本/历史；`system.py` 是唯一 subprocess 适配层，argv 执行、超时、不使用 shell、不回显潜在敏感参数。纯逻辑测试可替换 Runner、Network、Services、Transport。
 
-`rules.py` 校验引用、协议与监听冲突；`realm.py` 编译 TOML 和独立 unit；`deployment.py` 负责持久日志和文件/服务补偿；`sync.py` 协调多个 Ingress；`wireguard.py` 单独管理密钥及隧道。更改 Realm 规则不会调用 WG 密钥或重启隧道。
+`rules.py` 校验引用、协议与监听冲突；`realm.py` 编译 TOML 和独立 unit；`deployment.py` 负责持久日志和文件/服务补偿；`sync.py` 协调多个 Ingress；`wireguard.py` 单独管理密钥及隧道。更改 Realm 规则不会调用 WG 密钥或重启隧道。`wg_link.py` 通过固定 ip/wg 参数执行原生 WG，私钥只经标准输入传给 wg，不执行配置中的 Shell hook；接口创建时附带已持久化的唯一所有权标记，回收前核对标记。
 
 ```mermaid
 flowchart LR

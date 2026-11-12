@@ -1,3 +1,4 @@
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,7 +26,7 @@ class MigrationTests(unittest.TestCase):
             '[network]\nuse_udp=true\nipv6_only=true\n[[endpoints]]\nlisten="[::]:5203"\nremote="192.0.2.80:5203"\nthrough="192.0.2.10"\ninterface="eth0"\n'
         )
         self.unit = external / "realm-manual.service"
-        self.unit.write_text(f"[Service]\nExecStart=/usr/bin/realm -c {config}\n")
+        self.unit.write_text(f"[Service]\nExecStart=/usr/bin/realm -c {shlex.quote(str(config))}\n")
         record = scan_existing(self.runner, [external])[0]
         imported = import_existing(
             self.lab.store, self.lab.rules, record, "line-a", root / "import-backup"

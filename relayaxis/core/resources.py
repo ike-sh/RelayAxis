@@ -110,7 +110,7 @@ class ResourceFiles:
         results = []
         with file_lock(self.paths.state / "resource-files.lock"):
             for path in sorted((self.paths.state / "resource-journals").glob("*.json")):
-                journal = json.loads(path.read_text())
+                journal = json.loads(path.read_text(encoding="utf-8"))
                 committed = self.store.runtime("resource-commit:" + journal["id"], False)
                 if not committed:
                     self._restore(journal)

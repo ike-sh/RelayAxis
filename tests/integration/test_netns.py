@@ -14,9 +14,11 @@ from pathlib import Path
 from relayaxis.core.network import Network
 from relayaxis.core.realm import Endpoint, render
 from relayaxis.core.system import Runner
+from relayaxis.core.wg_link import WireGuardLink, load_config
 from relayaxis.core.wireguard import render as render_wg
 from relayaxis.errors import ValidationError
 from relayaxis.models import Egress, Tunnel
+from relayaxis.storage import Store
 
 
 class NamespaceRunner(Runner):
@@ -34,7 +36,7 @@ class NamespaceIntegrationTests(unittest.TestCase):
             raise unittest.SkipTest("特权 WG/PBR 测试未授权启用：设置 RELAYAXIS_NETNS=1")
         if not hasattr(os, "geteuid") or os.geteuid() != 0:
             raise unittest.SkipTest("真实 namespace/WireGuard 测试需要 root")
-        for tool in ("ip", "wg", "wg-quick", "ping"):
+        for tool in ("ip", "wg", "ping", "sysctl"):
             if not shutil.which(tool):
                 raise unittest.SkipTest(f"缺少网络测试依赖: {tool}")
         cls.realm = os.environ.get("RELAYAXIS_REALM") or shutil.which("realm")
@@ -221,9 +223,18 @@ class NamespaceIntegrationTests(unittest.TestCase):
             path = directory / f"{device}.conf"
             path.write_text(render_wg(tunnel, private))
             path.chmod(0o600)
-            self.nscommand(ns, ["wg-quick", "up", str(path)])
-            self.nscommand(ns, ["ip", "route", "add", peer + "/32", "dev", device, "proto", "186"])
-        self.nscommand("c", ["ping", "-c", "2", "-W", "2", ingress_address])
+            parsed, secret = load_config(path.read_text(encoding="utf-8"), tunnel.__dict__)
+            WireGuardLink(NamespaceRunner(self.ns[ns]), Store(directory / "state.sqlite3")).up(
+                parsed, secret
+            )
+        deadline = time.monotonic() + 10
+        while True:
+            response = self.nscommand("c", ["ping", "-c", "1", "-W", "1", ingress_address], False)
+            if response.returncode == 0:
+                break
+            if time.monotonic() >= deadline:
+                self.fail("Controller 发起后 WG 未在 10 秒内完成握手")
+            time.sleep(0.2)
         handshakes = self.nscommand(
             "c", ["wg", "show", f"ra-{ingress}", "latest-handshakes"]
         ).stdout.split()
