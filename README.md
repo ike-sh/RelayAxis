@@ -132,7 +132,7 @@ sudo env RELAYAXIS_NETNS=1 RELAYAXIS_REALM=/tmp/realm \
 
 ## 首版限制
 
-- 未在当前开发机完成干净 Debian 13 实机安装、重启、跨公网 NAT 或双端 Mimic 验收；见 [验证记录](docs/validation.md)。
+- 已在 CI 通过原生 WG 与双 PBR namespace 数据流测试；尚未完成干净 Debian 13 实机安装、重启、跨公网 NAT 或双端 Mimic 验收；见 [验证记录](docs/validation.md)。
 - 分布式应用没有全局原子提交。前置机失败时保留本机旧/新内部监听，其他前置机与 IPv6 可继续运行，状态显示部分成功。全部确认后才清理旧监听。
 - 每条被修改规则可能短暂中断自己的现有连接；不承诺无损重载或迁移既有 TCP/UDP 会话。
 - 每个物理网卡首版只管理一个 Mimic 实例；通过两端独立控制台启停，再用 `mimic verify` 核验。不经唯一 WG 管理链路盲目自动切换。
