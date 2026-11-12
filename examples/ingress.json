@@ -1,0 +1,10 @@
+{
+  "server_id": "front-a",
+  "server_name": "公网前置机 A",
+  "public_ipv4": "198.51.100.20",
+  "tunnel_id": "front-a",
+  "ssh_user": "root",
+  "ssh_port": 22,
+  "identity_file": "/etc/relayaxis/ssh/front-a",
+  "known_hosts_file": "/etc/relayaxis/ssh/known_hosts"
+}

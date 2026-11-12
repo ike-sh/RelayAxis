@@ -1,0 +1,10 @@
+{
+  "tunnel_id": "front-a",
+  "interface": "ra-a",
+  "role": "ingress",
+  "local_address": "10.203.0.2/30",
+  "peer_address": "10.203.0.1/30",
+  "listen_port": 51820,
+  "mtu": 1420,
+  "keepalive": 0
+}

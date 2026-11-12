@@ -1,0 +1,12 @@
+# Managed by RelayAxis
+[Unit]
+Description=Retry pending RelayAxis ingress snapshots
+
+[Timer]
+OnBootSec=45s
+OnUnitInactiveSec=60s
+Persistent=true
+RandomizedDelaySec=5s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,40 @@
+name: Test RelayAxis
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  unit:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.11', '3.13']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install ruff build
+      - run: python -m unittest discover -v
+      - run: ruff check relayaxis tests
+      - run: ruff format --check relayaxis tests
+      - run: python -m build
+      - if: runner.os == 'Linux'
+        run: shellcheck install.sh uninstall.sh
+  linux-network:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: sudo apt-get update && sudo apt-get install -y iproute2 wireguard-tools iputils-ping
+      - run: python -m relayaxis.fetch_realm /tmp/relayaxis-ci-realm
+      - name: Real Realm TCP, UDP and IPv6
+        env:
+          RELAYAXIS_REALM: /tmp/relayaxis-ci-realm
+        run: python -m unittest tests.integration.test_realm_live -v
+      - name: Isolated namespaces, native WG and source PBR
+        run: sudo env RELAYAXIS_NETNS=1 RELAYAXIS_REALM=/tmp/relayaxis-ci-realm python3 -m unittest tests.integration.test_netns -v

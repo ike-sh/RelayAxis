@@ -1,0 +1,9 @@
+{
+  "name": "IPv6 直连示例",
+  "remark": "请替换文档地址",
+  "remote_host": "192.0.2.80",
+  "remote_port": 5203,
+  "protocol": "both",
+  "egress_id": "line-main",
+  "bindings": [{"server_id": "local", "listen_address": "::", "listen_port": 5203}]
+}

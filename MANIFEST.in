@@ -1,0 +1,7 @@
+include ra install.sh uninstall.sh LICENSE README.md
+recursive-include docs *.md
+recursive-include examples *.json
+recursive-include systemd *.service *.timer
+recursive-include tests *.py
+recursive-include .github/workflows *.yml
+global-exclude __pycache__ *.py[cod]

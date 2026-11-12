@@ -1,0 +1,12 @@
+{
+  "name": "多入口示例",
+  "remote_host": "192.0.2.80",
+  "remote_port": 5203,
+  "protocol": "both",
+  "egress_id": "line-main",
+  "bindings": [
+    {"server_id": "local", "listen_address": "::", "listen_port": 5203},
+    {"server_id": "front-a", "listen_address": "0.0.0.0", "listen_port": 5203},
+    {"server_id": "front-b", "listen_address": "0.0.0.0", "listen_port": 15203}
+  ]
+}

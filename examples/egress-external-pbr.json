@@ -1,0 +1,11 @@
+{
+  "egress_id": "line-cn2",
+  "name": "电信/CN2（示例）",
+  "interface": "eth1",
+  "source": "198.51.100.10",
+  "gateway": "198.51.100.1",
+  "table": "108",
+  "priority": 18080,
+  "managed": false,
+  "dependency_service": "ipv4-eth1-pbr.service"
+}

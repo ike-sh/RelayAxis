@@ -1,0 +1,12 @@
+# Managed by RelayAxis
+[Unit]
+Description=RelayAxis recovery and desired state reconciliation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/local/bin/ra --json recovery repair
+ExecStart=/usr/local/bin/ra --json sync reconcile
+TimeoutStartSec=600
+UMask=0077

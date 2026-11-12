@@ -1,0 +1,10 @@
+{
+  "egress_id": "line-main",
+  "name": "主线路（示例）",
+  "interface": "eth0",
+  "source": "192.0.2.10",
+  "gateway": "192.0.2.1",
+  "table": "main",
+  "priority": 0,
+  "managed": false
+}
