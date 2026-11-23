@@ -146,12 +146,14 @@ class NetworkdRestartIntegrationTests(unittest.TestCase):
         self.netif = root / "netif"
         self.empty_usr = root / "empty-usr"
         self.empty_dbus = root / "empty-dbus"
+        self.empty_resolve = root / "empty-resolve"
         for directory in (
             self.config,
             self.etc_config / "10-relayaxis-lab.network.d",
             self.netif,
             self.empty_usr,
             self.empty_dbus,
+            self.empty_resolve,
         ):
             directory.mkdir(parents=True)
         (self.config / "10-relayaxis-lab.network").write_text(
@@ -188,13 +190,14 @@ class NetworkdRestartIntegrationTests(unittest.TestCase):
     def start_networkd(self):
         script = """
 set -eu
-mkdir -p /run/systemd/network /run/systemd/netif /run/dbus
+mkdir -p /run/systemd/network /run/systemd/netif /run/dbus /run/systemd/resolve
 mount --bind "$1" /run/systemd/network
 mount --bind "$2" /run/systemd/netif
 mount --bind "$3" /etc/systemd/network
 mount --bind "$4" /usr/lib/systemd/network
 mount --bind "$5" /run/dbus
-exec "$6"
+mount --bind "$6" /run/systemd/resolve
+exec "$7"
 """
         log = (Path(self.temp.name) / f"networkd-{len(self.logs)}.log").open("wb")
         self.logs.append(log)
@@ -219,6 +222,7 @@ exec "$6"
                 str(self.etc_config),
                 str(self.empty_usr),
                 str(self.empty_dbus),
+                str(self.empty_resolve),
                 self.networkd,
             ],
             stdout=log,
