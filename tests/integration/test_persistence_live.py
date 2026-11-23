@@ -184,13 +184,17 @@ class NetworkdRestartIntegrationTests(unittest.TestCase):
         for path in (*self.config.rglob("*"), *self.etc_config.rglob("*")):
             if path.is_file():
                 path.chmod(0o644)
-        os.chown(self.netif, self.network_user.pw_uid, self.network_user.pw_gid)
-        self.netif.chmod(0o755)
+        for directory in (self.netif, self.empty_resolve_hook):
+            os.chown(directory, self.network_user.pw_uid, self.network_user.pw_gid)
+            directory.chmod(0o755)
 
     def start_networkd(self):
         script = """
 set -eu
 mkdir -p /run/systemd/network /run/systemd/netif /run/dbus /run/systemd/resolve.hook
+# systemd 259 treats writable /sys as proof that udevd is available.
+mount --bind /sys /sys
+mount -o remount,bind,ro /sys
 mount --bind "$1" /run/systemd/network
 mount --bind "$2" /run/systemd/netif
 mount --bind "$3" /etc/systemd/network
