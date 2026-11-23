@@ -50,6 +50,39 @@ class ModelsTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             Egress("x", "X", "eth0", "192.0.2.3", "192.0.2.1", managed=True).validate()
 
+    def test_v010_managed_flag_migrates_without_changing_resource_ownership(self):
+        system = Egress("main", "默认", "eth0", "192.0.2.3", "192.0.2.1").validate()
+        external = Egress(
+            "external", "外部", "eth1", "198.51.100.3", "198.51.100.1", "108", 18080
+        ).validate()
+        legacy = Egress(
+            "legacy",
+            "旧受管",
+            "eth1",
+            "198.51.100.3",
+            "198.51.100.1",
+            "108",
+            18080,
+            managed=True,
+            dependency_service="relayaxis-pbr-legacy.service",
+        ).validate()
+        self.assertEqual((system.management, system.backend), ("system", "system"))
+        self.assertEqual((external.management, external.backend), ("external", "external"))
+        self.assertEqual((legacy.management, legacy.backend), ("relayaxis", "legacy-oneshot"))
+        with self.assertRaises(ValidationError):
+            Egress(
+                "bad-native",
+                "冲突",
+                "eth1",
+                "198.51.100.3",
+                "198.51.100.1",
+                "108",
+                18080,
+                management="external",
+                backend="netplan",
+                dependency_service="legacy-pbr.service",
+            ).validate()
+
     def test_rule_round_trip(self):
         rule = Rule("日本", "192.0.2.88", 5203, "line", [Binding("::", 5203)])
         self.assertEqual(Rule.from_dict(rule.to_dict()), rule.validate())

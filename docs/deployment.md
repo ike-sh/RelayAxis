@@ -24,15 +24,52 @@ sudo ra ipv6 list
 sudo ra realm scan
 ```
 
-用实际地址编辑 `examples/egress-main.json`、`examples/egress-external-pbr.json`。表名使用 `main` 或数字 ID，外部 PBR 始终 `managed: false`。如已有 `ipv4-eth1-pbr.service`，填写 `dependency_service`，保留原服务。
+`egress discover` 读取当前内核事实。先确认输出中的 `is_default`、`default_resolved`、metric、source、gateway、table 和 priority。名称由管理员填写；不要从 `eth0/eth1`、地址或 ASN 猜运营商。以下拓扑采用同一模型，不需要改代码：
+
+- 9929 默认 + CN2 非默认；
+- CN2 默认 + 9929 非默认；
+- 普通 BGP 默认 + 9929/CN2 两个策略出口；
+- 单网卡单出口；
+- `ens18/ens19/enp1s0` 等任意合法接口名和三网卡多出口。
+
+相同最低 metric 的多个 main default、缺失 default、多路径或源地址不唯一时，没有记录会被擅自标记为默认；先由管理员核对系统网络配置。
+
+用实际地址编辑 `examples/egress-main.json`、`examples/egress-external-pbr.json`。表名使用 `main` 或数字 ID：系统 main 记录为 `management: system`；管理员已通过 Netplan/networkd 建立的 PBR 记录为 `management: external`。两者都保持 `managed: false`，RelayAxis 只读复用。
 
 ```bash
 sudo ra egress add --file /root/egress-main.json
 sudo ra egress add --file /root/egress-cn2.json
+sudo ra egress show line-cn2
+sudo ra egress backend line-cn2
 sudo ra egress check line-cn2 192.0.2.80 5203 --protocol both
 ```
 
-如果确实需要由 RelayAxis 创建新 PBR，使用空闲独立表、空闲优先级、现有本机源地址和网关，设置 `managed: true`，然后 `ra egress apply ID`。不要把现有外部表标为 managed。修改活动自建 PBR 前先禁用并同步相关业务。
+如果明确需要 RelayAxis 创建新 PBR，使用 `examples/egress-relayaxis-pbr.json`：空闲独立表、空闲优先级、现有本机源地址和网关，设置 `management: relayaxis`。不要把现有外部表改成 relayaxis。应用分两次命令，第二次必须回传刚审阅的计划 ID：
+
+```bash
+sudo ra egress add --file /root/egress-managed.json
+sudo ra egress plan line-managed
+# 审阅 backend/path/diff/default_route_before/rollback_guard_seconds
+sudo ra egress apply line-managed --confirm-apply --plan-id PLAN_ID
+sudo ra egress verify line-managed --target 192.0.2.80 --port 5203
+```
+
+后端自动选择顺序：明确为 Netplan + systemd-networkd 时使用独立 YAML；没有 Netplan 且当前接口由原生 networkd 管理时使用现有 `.network` 的 drop-in；NetworkManager 等未实现后端只读。修改活动自建 PBR 前先禁用并同步关联业务。
+
+### 从 v0.1.0 oneshot 迁移
+
+升级只兼容读取旧字段，不会后台迁移。旧记录显示 `backend: legacy-oneshot` 时：
+
+```bash
+sudo ra egress migrate OLD_ID
+# 审阅 ExecStart、ExecStop/ExecStopPost、反向依赖和原生后端 diff
+sudo ra egress migrate OLD_ID --confirm-migrate --plan-id PLAN_ID
+sudo ra egress verify OLD_ID
+```
+
+迁移先建立并验证原生配置，把出口记录切换到原生后端，再重新生成关联 Realm 单元。只有 `systemctl list-dependencies --reverse` 已确认旧 PBR unit 不再被任何服务引用，工具才对旧 unit **只执行 disable，不执行 stop**，从而避开可能含 `ip rule del` 或 `ip route flush table ...` 的 ExecStop。存在非 RelayAxis 反向依赖时保持审计模式，先由管理员处理依赖。
+
+原 unit 文件与审计记录保留。若进程在原生提交后中断，`recovery repair` 先恢复新的出口记录，并把事务保留为 `REALM_RECONCILE_REQUIRED`；定时同步移除 Realm 依赖后，下一轮恢复再完成 disable。该顺序避免下次开机因 Realm 的 `Requires=` 重新拉起旧管理器。确认一次整机重启和业务验证后，管理员再单独决定是否归档旧文件。
 
 ## 2. 每个前置机创建一条 WG
 

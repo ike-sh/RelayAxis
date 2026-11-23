@@ -80,10 +80,24 @@ class App:
 
     def status(self):
         rules = self.rules.list()
+        env = environment()
+        if env["platform"] == "Linux" and env["tools"]["ip"]:
+            egresses = self.routing.list_status()
+        else:
+            egresses = [
+                {
+                    **egress,
+                    "health": self.store.runtime(
+                        "egress-health:" + egress["egress_id"],
+                        {"status": "UNKNOWN", "ok": False, "reason": "尚未在 Linux 内核核验"},
+                    ),
+                }
+                for egress in self.store.list("egress")
+            ]
         return {
             "version": __version__,
             "settings": self.settings(),
-            "environment": environment(),
+            "environment": env,
             "rules": [
                 {
                     "rule_id": r["rule_id"],
@@ -104,14 +118,16 @@ class App:
                 }
                 for s in self.store.list("server")
             ],
-            "egresses": self.store.list("egress"),
+            "egresses": egresses,
             "tunnels": self.store.list("tunnel"),
         }
 
     def verify_install(self):
         env = environment()
         missing = [
-            name for name in ("ip", "ss", "wg", "ssh", "systemctl") if not env["tools"][name]
+            name
+            for name in ("ip", "ss", "wg", "ssh", "systemctl", "systemd-run", "networkctl")
+            if not env["tools"][name]
         ]
         realm = self.store.runtime("realm-binary", "/usr/local/bin/realm")
         if not Path(realm).is_file() and not shutil.which(realm):

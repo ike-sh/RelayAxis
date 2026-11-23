@@ -1,11 +1,14 @@
+import hashlib
 import ipaddress
 import json
+import re
 from dataclasses import asdict
 
-from ..errors import ApplyError, ConflictError, ValidationError
-from ..models import Egress, new_id, now
+from ..errors import ApplyError, ConflictError, RelayAxisError, ValidationError
+from ..models import Egress, EgressHealth, PersistenceBackend, identifier, new_id, now
 from ..storage import canonical
 from .network import table_name
+from .persistence import PersistenceManager
 from .resources import ResourceFiles
 from .system import atomic_write, file_lock
 
@@ -14,21 +17,23 @@ class Routing:
     def __init__(self, paths, store, network, runner, services):
         self.paths, self.store, self.network = paths, store, network
         self.runner, self.services = runner, services
+        self.persistence = PersistenceManager(paths, store, network, runner, services)
 
     def save(self, data, updating=False):
         egress = Egress(**data).validate()
-        if egress.managed:
-            egress.dependency_service = f"relayaxis-pbr-{egress.egress_id}.service"
         with file_lock(self.paths.state / "control.lock"):
-            existing = next(
+            existing_raw = next(
                 (e for e in self.store.list("egress") if e["egress_id"] == egress.egress_id), None
             )
+            existing = Egress(**existing_raw).validate() if existing_raw else None
             if existing and not updating:
                 raise ConflictError("出口 ID 已存在")
             if updating and not existing:
                 raise ValidationError("出口不存在")
-            if existing and existing["managed"] != egress.managed:
-                raise ValidationError("不能把外部出口切换为自建出口或反向切换")
+            if existing and existing.management != egress.management:
+                raise ValidationError("不能通过普通更新改变出口资源所有权")
+            if not existing and egress.backend == PersistenceBackend.LEGACY_ONESHOT:
+                raise ValidationError("新出口必须使用原生网络持久化后端")
             network_fields = (
                 "interface",
                 "source",
@@ -36,22 +41,32 @@ class Routing:
                 "table",
                 "priority",
                 "dependency_service",
+                "management",
+                "backend",
             )
-            if (
+            network_changed = bool(
                 existing
-                and any(existing.get(k) != asdict(egress).get(k) for k in network_fields)
-                and self._referenced_live(existing)
-            ):
+                and any(asdict(existing).get(k) != asdict(egress).get(k) for k in network_fields)
+            )
+            if network_changed and self.store.runtime("persistence:" + egress.egress_id, {}):
+                raise ConflictError(
+                    "原生 PBR 已应用；先用带 plan-id 的出口删除流程撤销，再重建参数"
+                )
+            if network_changed and self._referenced_live(asdict(existing)):
                 raise ConflictError("出口仍在运行中使用；先禁用并完成关联规则同步，再修改出口参数")
-            for other in self.store.list("egress"):
-                if other["egress_id"] == egress.egress_id:
+            for other_raw in self.store.list("egress"):
+                other = Egress(**other_raw).validate()
+                if other.egress_id == egress.egress_id:
                     continue
                 if egress.managed and (
-                    str(other["table"]) == egress.table or other["priority"] == egress.priority
+                    str(other.table) == egress.table or other.priority == egress.priority
                 ):
                     raise ConflictError("自建出口路由表或优先级已被使用")
             return self.store.put(
-                "egress", egress.egress_id, asdict(egress), existing["revision"] if existing else 0
+                "egress",
+                egress.egress_id,
+                asdict(egress),
+                existing.revision if existing else 0,
             )
 
     def _referenced_live(self, egress):
@@ -184,6 +199,8 @@ class Routing:
             egress = Egress(**data).validate()
             if not egress.managed:
                 raise ValidationError("外部 PBR 只读复用，不能激活或重建")
+            if egress.backend != PersistenceBackend.LEGACY_ONESHOT:
+                raise ValidationError("activate 仅供 v0.1.0 旧 PBR 单元兼容调用")
             if not self.network.source_present(egress):
                 raise ValidationError("出口源地址不存在，拒绝创建策略路由")
             commands = self._commands(egress, "add")
@@ -262,8 +279,11 @@ class Routing:
             old = self.store.runtime("pbr:" + egress_id, {})
             if not old:
                 return {"state": "DISABLED", "changed": False}
-            if not Egress(**old["egress"]).validate().managed:
+            legacy = Egress(**old["egress"]).validate()
+            if not legacy.managed:
                 raise ValidationError("拒绝删除外部策略路由")
+            if legacy.backend != PersistenceBackend.LEGACY_ONESHOT:
+                raise ValidationError("deactivate 仅清理 v0.1.0 旧 PBR 条目")
             commands = old.get("commands") or self._commands(Egress(**old["egress"]), "add")
             identity = new_id()
             journal = {
@@ -288,7 +308,7 @@ class Routing:
             path.unlink()
             return {"state": "DISABLED"}
 
-    def recover(self):
+    def _recover_legacy(self):
         reports = []
         with file_lock(self.paths.state / "pbr-activate.lock"):
             for path in sorted((self.paths.state / "routing-journals").glob("*.json")):
@@ -316,67 +336,517 @@ class Routing:
                 reports.append(path.name)
         return reports
 
-    def apply(self, egress_id):
-        self.runner.require_root()
+    def recover(self):
         with file_lock(self.paths.state / "routing.lock"):
+            native = self.persistence.recover()
+            return {
+                "legacy_kernel": self._recover_legacy(),
+                "native_persistence": native,
+                "pbr_migrations": self._recover_pbr_migrations(),
+            }
+
+    def _recover_pbr_migrations(self):
+        reports = []
+        for path in sorted((self.paths.state / "pbr-migrations").glob("*.json")):
+            if path.is_symlink():
+                raise ApplyError("PBR 迁移日志不能是符号链接")
+            journal = json.loads(path.read_text(encoding="utf-8"))
+            if not re.fullmatch(r"[0-9a-f]{16}", path.stem) or journal.get("id") != path.stem:
+                raise ApplyError("PBR 迁移日志身份异常")
+            egress_id = journal.get("egress_id", "")
+            unit = journal.get("unit", "")
+            try:
+                identifier(egress_id)
+            except ValidationError as exc:
+                raise ApplyError("PBR 迁移日志出口身份异常") from exc
+            if unit != f"relayaxis-pbr-{egress_id}.service":
+                raise ApplyError("PBR 迁移日志含非受管服务")
+            runtime = self.store.runtime("persistence:" + egress_id, {})
+            if not runtime:
+                # Native apply either never began or was rolled back by its own
+                # journal. The enabled legacy unit remains the owner.
+                path.unlink()
+                reports.append({"egress_id": egress_id, "state": "LEGACY_PRESERVED"})
+                continue
             egress = Egress(**self.store.get("egress", egress_id)).validate()
-            if not egress.managed:
-                return {"state": "EXTERNAL", "note": "保留已有服务和路由，请使用 egress check 验证"}
-            if not self.network.source_present(egress):
-                raise ValidationError("出口源地址不存在")
-            unit = f"relayaxis-pbr-{egress_id}.service"
-            unit_path, config = self.paths.units / unit, self.config_path(egress_id)
-            owned = self.store.runtime("pbr-unit:" + egress_id)
-            if (unit_path.exists() or config.exists()) and not owned:
-                raise ConflictError("拒绝覆盖未登记的 PBR 配置或服务")
-            original = json.loads(config.read_text(encoding="utf-8")) if config.exists() else {}
-            fields = ("interface", "source", "gateway", "table", "priority")
-            same_network = original and all(
-                original.get(k) == asdict(egress).get(k) for k in fields
-            )
-            if original and not same_network and self._referenced_live(original):
-                raise ConflictError("旧出口仍有活动监听，先禁用关联业务")
-            resource = ResourceFiles(self.paths, self.store, self.services)
-            state = self.services.state(unit)
-            with resource.transaction(unit, [config, unit_path]) as identity:
-                if state["active"] and not same_network:
-                    self.services.action("stop", unit)
-                atomic_write(config, canonical(asdict(egress)))
+            updated = Egress(
+                **{
+                    **asdict(egress),
+                    "backend": runtime["backend"],
+                    "dependency_service": "",
+                }
+            ).validate()
+            with self.store.transaction() as db:
+                if (
+                    egress.backend != updated.backend
+                    or egress.dependency_service != updated.dependency_service
+                ):
+                    self.store.put("egress", egress_id, asdict(updated), egress.revision, db)
+                previous = self.store.runtime("legacy-pbr:" + egress_id, {}, db)
+                self.store.set_runtime(
+                    "legacy-pbr:" + egress_id,
+                    {
+                        **previous,
+                        "unit": unit,
+                        "native_staged": True,
+                        "staged_at": now(),
+                        "recovered": True,
+                    },
+                    db,
+                )
+            reverse, dependents = self._legacy_dependencies(unit)
+            if reverse.returncode or dependents:
                 atomic_write(
-                    unit_path,
-                    f"""# Managed by RelayAxis
-[Unit]
-Description=RelayAxis PBR {egress_id}
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/local/bin/ra --json egress activate {egress_id} --from-config
-ExecStop=/usr/local/bin/ra --json egress deactivate {egress_id}
-ExecStopPost=-/usr/local/bin/ra --json egress deactivate {egress_id}
-
-[Install]
-WantedBy=multi-user.target
-""",
+                    path,
+                    canonical(
+                        {
+                            **journal,
+                            "phase": "AWAITING_REALM_RECONCILE",
+                            "remaining_dependencies": dependents,
+                        }
+                    ),
                 )
-                self.services.daemon_reload()
-                self.services.action("enable", unit)
-                if same_network and state["active"]:
-                    self.activate(egress_id, from_config=True)
-                else:
-                    self.services.action("start", unit)
-                if not self.services.healthy(unit):
-                    raise ApplyError("PBR 服务启动失败")
-                self.activate(egress_id, from_config=True)
-                resource.commit(
-                    identity,
-                    lambda db: self.store.set_runtime("pbr-unit:" + egress_id, {"unit": unit}, db),
+                reports.append(
+                    {
+                        "egress_id": egress_id,
+                        "state": "REALM_RECONCILE_REQUIRED",
+                        "remaining_dependencies": dependents,
+                    }
                 )
-            return {"state": "ACTIVE", "dependency_service": unit}
+                continue
+            if self.services.state(unit)["enabled"]:
+                self.services.action("disable", unit)
+            with self.store.transaction() as db:
+                previous = self.store.runtime("legacy-pbr:" + egress_id, {}, db)
+                self.store.set_runtime(
+                    "legacy-pbr:" + egress_id,
+                    {
+                        **previous,
+                        "disabled_without_stop": True,
+                        "migrated_at": now(),
+                        "native_staged": False,
+                    },
+                    db,
+                )
+                self.store.set_runtime("pbr:" + egress_id, {}, db)
+                self.store.set_runtime("pbr-unit:" + egress_id, {}, db)
+                self.store.set_runtime("pbr-migration-plan:" + egress_id, {}, db)
+            path.unlink()
+            reports.append({"egress_id": egress_id, "state": "NATIVE_FINALIZED"})
+        return reports
 
-    def delete(self, egress_id):
+    def health(self, egress_id, target="198.51.100.1", port=443, protocol="tcp"):
+        egress = Egress(**self.store.get("egress", egress_id)).validate()
+        try:
+            report = self.network.egress_health(egress, target, port, protocol)
+        except (RelayAxisError, OSError, ValueError, TypeError, KeyError) as exc:
+            report = {
+                "egress_id": egress_id,
+                "status": EgressHealth.UNKNOWN,
+                "ok": False,
+                "target": target,
+                "checks": {},
+                "error": type(exc).__name__,
+            }
+        previous = self.store.runtime("egress-health:" + egress_id, {})
+        current = {
+            **report,
+            "management": egress.management,
+            "backend": egress.backend,
+            "checked_at": now(),
+        }
+        if report["status"] != EgressHealth.HEALTHY:
+            current["last_error"] = {
+                "status": report["status"],
+                "at": current["checked_at"],
+                "error": report.get("error", ""),
+            }
+        elif previous.get("last_error"):
+            current["last_error"] = previous["last_error"]
+        self.store.set_runtime("egress-health:" + egress_id, current)
+        return current
+
+    def list_status(self, target="198.51.100.1", port=443):
+        result = []
+        for data in self.store.list("egress"):
+            egress = Egress(**data).validate()
+            try:
+                health = self.health(egress.egress_id, target, port)
+            except Exception as exc:
+                health = {
+                    "status": EgressHealth.UNKNOWN,
+                    "ok": False,
+                    "error": type(exc).__name__,
+                }
+            result.append({**asdict(egress), "health": health})
+        return result
+
+    def backend_status(self, egress_id):
+        egress = Egress(**self.store.get("egress", egress_id)).validate()
+        return self.persistence.status(egress)
+
+    def plan(self, egress_id, migration=False):
+        egress = Egress(**self.store.get("egress", egress_id)).validate()
+        return self.persistence.plan(egress, migration=migration, allow_existing=migration)
+
+    def apply(self, egress_id, confirm=False, plan_id=""):
+        egress = Egress(**self.store.get("egress", egress_id)).validate()
+        if not egress.managed:
+            return {
+                "state": "SYSTEM" if egress.management == "system" else "EXTERNAL",
+                "management": egress.management,
+                "note": "复用并验证现有路由，不改变其配置",
+            }
+        if egress.backend == PersistenceBackend.LEGACY_ONESHOT:
+            audit = self.audit_legacy(egress_id)
+            result = {
+                "state": "MIGRATION_REQUIRED",
+                "audit": audit,
+            }
+            if audit["safe_migration"]:
+                result["plan"] = self.plan(egress_id, migration=True)
+            return result
+        if not confirm:
+            return self.plan(egress_id)
+        with file_lock(self.paths.state / "routing.lock"):
+            result = self.persistence.apply(egress, plan_id)
+            selected = result["backend"]
+            updated = Egress(
+                **{
+                    **asdict(egress),
+                    "backend": selected,
+                    "dependency_service": "",
+                }
+            ).validate()
+            self.store.put("egress", egress_id, asdict(updated), egress.revision)
+        return result
+
+    def _legacy_dependencies(self, unit):
+        reverse = self.runner.run(
+            ["systemctl", "list-dependencies", "--reverse", unit, "--plain", "--no-pager"],
+            check=False,
+        )
+        dependents = sorted(
+            {
+                value.strip().lstrip("●").strip()
+                for value in reverse.stdout.splitlines()
+                if value.strip().endswith(".service") and value.strip().lstrip("●").strip() != unit
+            }
+        )
+        return reverse, dependents
+
+    def audit_legacy(self, egress_id):
+        egress = Egress(**self.store.get("egress", egress_id)).validate()
+        unit = egress.dependency_service or self.store.runtime("pbr-unit:" + egress_id, {}).get(
+            "unit", ""
+        )
+        if not unit:
+            return {
+                "egress_id": egress_id,
+                "legacy": False,
+                "safe_migration": False,
+                "reason": "未登记旧 PBR 服务",
+            }
+        state = self.services.state(unit)
+        cat = self.runner.run(["systemctl", "cat", unit, "--no-pager"], check=False)
+        reverse, dependents = self._legacy_dependencies(unit)
+        text = cat.stdout
+        starts = re.findall(r"(?m)^ExecStart\s*=\s*(.+)$", text)
+        stops = re.findall(r"(?m)^ExecStop(?:Post)?\s*=\s*(.+)$", text)
+        start_text = "\n".join(starts)
+        direct_commands = bool(starts) and all(
+            re.search(r"(?:^|/)ip\s+-4\s+(?:rule|route)\s+(?:add|replace)\b", command)
+            for command in starts
+        )
+        direct_match = direct_commands and all(
+            item in start_text
+            for item in (
+                egress.interface,
+                egress.source,
+                egress.gateway,
+                egress.table,
+                str(egress.priority),
+            )
+        )
+        internal_commands = bool(starts) and all(
+            re.search(rf"(?:^|\s)egress\s+activate\s+{re.escape(egress_id)}(?:\s|$)", command)
+            and "--from-config" in command
+            for command in starts
+        )
+        config_matches = False
+        config = self.config_path(egress_id)
+        if internal_commands and config.is_file() and not config.is_symlink():
+            try:
+                configured = Egress(**json.loads(config.read_text(encoding="utf-8"))).validate()
+                fields = ("egress_id", "interface", "source", "gateway", "table", "priority")
+                config_matches = all(
+                    getattr(configured, field) == getattr(egress, field) for field in fields
+                )
+            except (OSError, ValueError, TypeError, ValidationError):
+                config_matches = False
+        expected = direct_match or (internal_commands and config_matches)
+        start_mode = "direct-ip" if direct_match else "relayaxis-v0.1.0" if expected else "unknown"
+        owned = bool(
+            unit == f"relayaxis-pbr-{egress_id}.service"
+            and self.store.runtime("pbr-unit:" + egress_id)
+        )
+        external_dependents = [
+            value
+            for value in dependents
+            if not re.fullmatch(r"relayaxis-realm-[a-zA-Z0-9_-]+\.service", value)
+        ]
+        native_backend = self.persistence.detect(
+            Egress(**{**asdict(egress), "backend": "auto", "dependency_service": ""}).validate()
+        )
+        return {
+            "egress_id": egress_id,
+            "legacy": True,
+            "unit": unit,
+            "active": state["active"],
+            "enabled": state["enabled"],
+            "exec_start": starts,
+            "exec_start_mode": start_mode,
+            "exec_stop": stops,
+            "exec_stop_destructive": any(
+                " rule del " in f" {command} "
+                or " route flush " in f" {command} "
+                or bool(
+                    re.search(
+                        rf"(?:^|\s)egress\s+deactivate\s+{re.escape(egress_id)}(?:\s|$)",
+                        command,
+                    )
+                )
+                for command in stops
+            ),
+            "reverse_dependencies": dependents,
+            "external_dependencies": external_dependents,
+            "matches_egress": expected,
+            "config_matches_egress": config_matches,
+            "owned": owned,
+            "safe_migration": bool(
+                egress.managed
+                and owned
+                and expected
+                and cat.returncode == 0
+                and reverse.returncode == 0
+                and not external_dependents
+                and native_backend["selected"]
+                in (PersistenceBackend.NETPLAN.value, PersistenceBackend.NETWORKD.value)
+            ),
+            "native_backend": native_backend,
+            "note": "Realm 反向依赖清零后只禁用旧单元，不调用可能清理新路由的 ExecStop",
+        }
+
+    @staticmethod
+    def _audit_fingerprint(audit):
+        material = {
+            key: audit.get(key)
+            for key in (
+                "unit",
+                "enabled",
+                "exec_start",
+                "exec_stop",
+                "reverse_dependencies",
+                "matches_egress",
+                "config_matches_egress",
+                "owned",
+                "safe_migration",
+            )
+        }
+        return hashlib.sha256(canonical(material).encode()).hexdigest()
+
+    def _pending_migration(self, egress_id):
+        for path in sorted((self.paths.state / "pbr-migrations").glob("*.json")):
+            if path.is_symlink():
+                raise ApplyError("PBR 迁移日志不能是符号链接")
+            journal = json.loads(path.read_text(encoding="utf-8"))
+            if not re.fullmatch(r"[0-9a-f]{16}", path.stem) or journal.get("id") != path.stem:
+                raise ApplyError("PBR 迁移日志身份异常")
+            if journal.get("egress_id") == egress_id:
+                return {**journal, "journal_id": path.stem}
+        return None
+
+    def migrate(self, egress_id, confirm=False, plan_id=""):
+        identifier(egress_id)
+        pending = self._pending_migration(egress_id)
+        if pending:
+            if self.store.runtime("persistence:" + egress_id, {}):
+                return {
+                    "state": "NATIVE_STAGED",
+                    "migration_id": pending.get("id", pending["journal_id"]),
+                    "legacy_unit": pending.get("unit", ""),
+                    "legacy_disabled_without_stop": False,
+                    "legacy_file_preserved": True,
+                    "reconcile_realm_required": True,
+                    "resumed": True,
+                }
+            return {
+                "state": "RECOVERY_REQUIRED",
+                "migration_id": pending.get("id", pending["journal_id"]),
+                "ok": False,
+                "error": "PBR 迁移事务尚未建立原生提交记录，请先运行 recovery repair",
+            }
+        audit = self.audit_legacy(egress_id)
+        if not audit["safe_migration"]:
+            return {"state": "AUDIT_ONLY", "audit": audit}
+        if not confirm:
+            plan = self.plan(egress_id, True)
+            audit_sha256 = self._audit_fingerprint(audit)
+            self.store.set_runtime(
+                "pbr-migration-plan:" + egress_id,
+                {
+                    "plan_id": plan["plan_id"],
+                    "audit_sha256": audit_sha256,
+                    "at": now(),
+                },
+            )
+            return {
+                "state": "PLANNED",
+                "audit": audit,
+                "audit_sha256": audit_sha256,
+                "plan": plan,
+            }
+        with (
+            file_lock(self.paths.state / "routing.lock"),
+            file_lock(self.paths.state / "pbr-migration.lock"),
+        ):
+            reviewed = self.store.runtime("pbr-migration-plan:" + egress_id, {})
+            current_audit = self.audit_legacy(egress_id)
+            if (
+                not current_audit["safe_migration"]
+                or reviewed.get("plan_id") != plan_id
+                or reviewed.get("audit_sha256") != self._audit_fingerprint(current_audit)
+            ):
+                raise ConflictError("旧单元或迁移计划已变化，请重新审阅")
+            audit = current_audit
+            egress = Egress(**self.store.get("egress", egress_id)).validate()
+            migration_id = new_id()
+            journal_path = self.paths.state / "pbr-migrations" / f"{migration_id}.json"
+            journal = {
+                "schema": 1,
+                "id": migration_id,
+                "egress_id": egress_id,
+                "unit": audit["unit"],
+                "plan_id": plan_id,
+                "phase": "APPLYING_NATIVE",
+                "at": now(),
+            }
+            atomic_write(journal_path, canonical(journal))
+            result = self.persistence.apply(egress, plan_id, migration=True)
+            atomic_write(journal_path, canonical({**journal, "phase": "NATIVE_APPLIED"}))
+            updated = Egress(
+                **{
+                    **asdict(egress),
+                    "backend": result["backend"],
+                    "dependency_service": "",
+                }
+            ).validate()
+            with self.store.transaction() as db:
+                saved = self.store.put("egress", egress_id, asdict(updated), egress.revision, db)
+                self.store.set_runtime(
+                    "legacy-pbr:" + egress_id,
+                    {
+                        **audit,
+                        "native_staged": True,
+                        "staged_at": now(),
+                    },
+                    db,
+                )
+        return {
+            **result,
+            "state": "NATIVE_STAGED",
+            "egress": saved,
+            "migration_id": migration_id,
+            "legacy_unit": audit["unit"],
+            "legacy_disabled_without_stop": False,
+            "legacy_file_preserved": True,
+            "reconcile_realm_required": True,
+        }
+
+    def finalize_migration(self, egress_id, migration_id):
+        identifier(egress_id)
+        if not re.fullmatch(r"[0-9a-f]{16}", migration_id):
+            raise ValidationError("PBR 迁移事务 ID 格式异常")
+        with (
+            file_lock(self.paths.state / "routing.lock"),
+            file_lock(self.paths.state / "pbr-migration.lock"),
+        ):
+            path = self.paths.state / "pbr-migrations" / f"{migration_id}.json"
+            if not path.is_file() or path.is_symlink():
+                raise ValidationError("未找到对应的 PBR 迁移事务")
+            journal = json.loads(path.read_text(encoding="utf-8"))
+            if journal.get("id") != migration_id or journal.get("egress_id") != egress_id:
+                raise ConflictError("PBR 迁移事务身份不匹配")
+            unit = journal.get("unit", "")
+            if unit != f"relayaxis-pbr-{egress_id}.service":
+                raise ConflictError("PBR 迁移事务服务身份异常")
+            runtime = self.store.runtime("persistence:" + egress_id, {})
+            if not runtime:
+                raise ConflictError("原生持久化提交记录缺失，保留旧 PBR 单元")
+            reverse, dependents = self._legacy_dependencies(unit)
+            if reverse.returncode or dependents:
+                atomic_write(
+                    path,
+                    canonical(
+                        {
+                            **journal,
+                            "phase": "AWAITING_REALM_RECONCILE",
+                            "remaining_dependencies": dependents,
+                        }
+                    ),
+                )
+                return {
+                    "state": "PENDING_SYNC",
+                    "error": "旧 PBR 单元仍有服务依赖，已保留为启用状态",
+                    "remaining_dependencies": dependents,
+                    "legacy_disabled_without_stop": False,
+                }
+            # RemainAfterExit may run destructive ExecStop commands.  Removing
+            # enablement only affects future boot; the current unit stays active.
+            if self.services.state(unit)["enabled"]:
+                self.services.action("disable", unit)
+            with self.store.transaction() as db:
+                previous = self.store.runtime("legacy-pbr:" + egress_id, {}, db)
+                self.store.set_runtime(
+                    "legacy-pbr:" + egress_id,
+                    {
+                        **previous,
+                        "native_staged": False,
+                        "disabled_without_stop": True,
+                        "migrated_at": now(),
+                    },
+                    db,
+                )
+                self.store.set_runtime("pbr:" + egress_id, {}, db)
+                self.store.set_runtime("pbr-unit:" + egress_id, {}, db)
+                self.store.set_runtime("pbr-migration-plan:" + egress_id, {}, db)
+            path.unlink()
+            return {
+                "state": "ACTIVE",
+                "legacy_unit": unit,
+                "legacy_disabled_without_stop": True,
+                "legacy_file_preserved": True,
+            }
+
+    def reconcile_persistence(self):
+        reports = []
+        with file_lock(self.paths.state / "routing.lock"):
+            for data in self.store.list("egress"):
+                egress = Egress(**data).validate()
+                try:
+                    reports.append(self.persistence.repair(egress))
+                except Exception as exc:
+                    reports.append(
+                        {
+                            "egress_id": egress.egress_id,
+                            "state": "UNKNOWN",
+                            "changed": False,
+                            "error": type(exc).__name__,
+                        }
+                    )
+        return reports
+
+    def delete(self, egress_id, confirm=False, plan_id=""):
         if any(
             r["egress_id"] == egress_id
             and (
@@ -395,6 +865,17 @@ WantedBy=multi-user.target
         self.runner.require_root()
         with file_lock(self.paths.state / "routing.lock"):
             unit = self.store.runtime("pbr-unit:" + egress_id, {}).get("unit")
+            persistence = self.store.runtime("persistence:" + egress_id, {})
+            if persistence:
+                if not confirm:
+                    return self.persistence.remove_plan(egress)
+                removed = self.persistence.remove(egress, plan_id)
+                self.store.remove("egress", egress_id)
+                return {
+                    "deleted": egress_id,
+                    "external_preserved": False,
+                    "persistence": removed,
+                }
             if unit:
                 resource = ResourceFiles(self.paths, self.store, self.services)
                 with resource.transaction(

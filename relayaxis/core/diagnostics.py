@@ -5,7 +5,7 @@ import struct
 import time
 
 from ..errors import ValidationError
-from ..models import port
+from ..models import Egress, port
 from .realm import Endpoint
 from .system import environment
 
@@ -150,6 +150,16 @@ def doctor(context):
     check("routes_ipv6", lambda: context.network.routes(6))
     check("policy_rules", context.network.policy_rules)
     check("listeners", context.network.listeners)
+    for data in context.store.list("egress"):
+        egress = Egress(**data).validate()
+        check(
+            "egress-route:" + egress.egress_id,
+            lambda e=egress: context.routing.health(e.egress_id),
+        )
+        check(
+            "egress-backend:" + egress.egress_id,
+            lambda e=egress: context.routing.backend_status(e.egress_id),
+        )
     for tunnel in context.store.list("tunnel"):
         check("wg:" + tunnel["tunnel_id"], lambda t=tunnel: context.wg.status(t["tunnel_id"]))
     for rule in context.rules.list():

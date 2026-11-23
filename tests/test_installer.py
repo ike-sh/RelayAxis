@@ -6,6 +6,35 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from relayaxis.config import Paths
+from relayaxis.errors import ConflictError
+from relayaxis.maintenance import uninstall
+from relayaxis.storage import Store
+
+
+class UninstallOwnershipTests(unittest.TestCase):
+    def test_purge_requires_native_network_fragments_to_be_removed_by_plan(self):
+        with tempfile.TemporaryDirectory() as temp:
+            paths = Paths(Path(temp))
+            paths.initialize()
+            prefix = paths.root / "opt/relayaxis"
+            prefix.mkdir(parents=True)
+            (prefix / ".relayaxis-owned").write_text("")
+            (paths.state / "installation.json").write_text(
+                json.dumps({"prefix": str(prefix), "units": []})
+            )
+            fragment = paths.netplan / "90-relayaxis-egress-line.yaml"
+            fragment.parent.mkdir(parents=True)
+            fragment.write_text("# Managed by RelayAxis; egress=line\n")
+            Store(paths.database).set_runtime(
+                "persistence:line",
+                {"backend": "netplan", "path": str(fragment), "sha256": "fixture"},
+            )
+            with self.assertRaises(ConflictError):
+                uninstall(paths, purge=True)
+            self.assertTrue(fragment.exists())
+            self.assertTrue(paths.state.exists())
+
 
 @unittest.skipUnless(os.name == "posix" and shutil.which("bash"), "Bash 安装器只在 Linux/Unix 测试")
 class InstallerTests(unittest.TestCase):
@@ -53,7 +82,7 @@ class InstallerTests(unittest.TestCase):
                 timeout=5,
             )
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-            self.assertEqual(json.loads(run.stdout)["version"], "0.1.0")
+            self.assertEqual(json.loads(run.stdout)["version"], "0.1.1")
 
     def test_idempotent_staging_upgrade_and_uninstall_preserve_external(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -76,7 +105,7 @@ class InstallerTests(unittest.TestCase):
             run = subprocess.run(
                 [str(command), "version", "--json"], capture_output=True, text=True, timeout=5
             )
-            self.assertEqual(json.loads(run.stdout)["version"], "0.1.0")
+            self.assertEqual(json.loads(run.stdout)["version"], "0.1.1")
             external = root / "etc/systemd/system/realm-manual.service"
             external.parent.mkdir(parents=True, exist_ok=True)
             external.write_text("external realm")

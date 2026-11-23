@@ -96,6 +96,13 @@ def parser():
         (
             "list",
             "discover",
+            "show",
+            "health",
+            "backend",
+            "plan",
+            "verify",
+            "migrate",
+            "reconcile",
             "add",
             "update",
             "delete",
@@ -104,12 +111,39 @@ def parser():
             "deactivate",
             "check",
             "test",
+            "rollback",
         ),
     )
     for name in ("add", "update"):
         egress[name].add_argument("--file", type=Path, required=True)
-    for name in ("delete", "apply", "activate", "deactivate", "check", "test"):
+    for name in (
+        "show",
+        "backend",
+        "plan",
+        "verify",
+        "migrate",
+        "delete",
+        "apply",
+        "activate",
+        "deactivate",
+        "check",
+        "test",
+    ):
         egress[name].add_argument("egress_id")
+    egress["health"].add_argument("egress_id", nargs="?")
+    egress["health"].add_argument("--target", default="198.51.100.1")
+    egress["health"].add_argument("--port", type=int, default=443)
+    egress["health"].add_argument("--protocol", choices=("tcp", "udp"), default="tcp")
+    egress["verify"].add_argument("--target", default="198.51.100.1")
+    egress["verify"].add_argument("--port", type=int, default=443)
+    egress["verify"].add_argument("--protocol", choices=("tcp", "udp"), default="tcp")
+    egress["apply"].add_argument("--confirm-apply", action="store_true")
+    egress["apply"].add_argument("--plan-id", default="")
+    egress["migrate"].add_argument("--confirm-migrate", action="store_true")
+    egress["migrate"].add_argument("--plan-id", default="")
+    egress["delete"].add_argument("--confirm-delete", action="store_true")
+    egress["delete"].add_argument("--plan-id", default="")
+    egress["rollback"].add_argument("transaction_id")
     egress["activate"].add_argument("--from-config", action="store_true", help=argparse.SUPPRESS)
     for name in ("check", "test"):
         egress[name].add_argument("host")
@@ -357,9 +391,74 @@ def dispatch(args, app):
         )
     if cmd == "egress":
         if action == "list":
-            return app.store.list("egress")
+            return app.routing.list_status()
         if action == "discover":
-            return app.network.discover_egresses()
+            saved = [egress_from_dict(item) for item in app.store.list("egress")]
+            result = []
+            for fact in app.network.discover_egresses():
+                match = next(
+                    (
+                        item
+                        for item in saved
+                        if item.interface == fact["interface"]
+                        and item.source == fact["source"]
+                        and item.table == fact["table"]
+                    ),
+                    None,
+                )
+                result.append(
+                    {
+                        **fact,
+                        "egress_id": match.egress_id if match else "",
+                        "name": match.name if match else "",
+                        "management": match.management if match else fact["management"],
+                        "backend": match.backend if match else fact["backend"],
+                    }
+                )
+            return result
+        if action == "show":
+            egress = egress_from_dict(app.store.get("egress", args.egress_id))
+            return {
+                **egress.__dict__,
+                "health": app.routing.health(args.egress_id),
+                "persistence": app.routing.backend_status(args.egress_id),
+            }
+        if action == "health":
+            if args.egress_id:
+                return app.routing.health(args.egress_id, args.target, args.port, args.protocol)
+            return [
+                app.routing.health(item["egress_id"], args.target, args.port, args.protocol)
+                for item in app.store.list("egress")
+            ]
+        if action == "backend":
+            return app.routing.backend_status(args.egress_id)
+        if action == "verify":
+            return {
+                "health": app.routing.health(args.egress_id, args.target, args.port, args.protocol),
+                "persistence": app.routing.backend_status(args.egress_id),
+            }
+        if action == "plan":
+            app.require_live()
+            return app.routing.plan(args.egress_id)
+        if action == "reconcile":
+            app.require_live()
+            return app.routing.reconcile_persistence()
+        if action == "rollback":
+            app.require_live()
+            return app.routing.persistence.rollback(args.transaction_id)
+        if action == "migrate":
+            app.require_live()
+            result = app.routing.migrate(args.egress_id, args.confirm_migrate, args.plan_id)
+            if result.get("state") == "NATIVE_STAGED" and result.get("reconcile_realm_required"):
+                result["realm_reconcile"] = app.coordinator.reconcile()
+                result["finalization"] = app.routing.finalize_migration(
+                    args.egress_id, result["migration_id"]
+                )
+                result["state"] = result["finalization"]["state"]
+                result["legacy_disabled_without_stop"] = result["finalization"].get(
+                    "legacy_disabled_without_stop", False
+                )
+            return result
         if action in ("add", "update"):
             app.backups.create()
             return app.routing.save(read_json(args.file), action == "update")
@@ -380,6 +479,10 @@ def dispatch(args, app):
         app.require_live()
         if action == "activate":
             return app.routing.activate(args.egress_id, args.from_config)
+        if action == "apply":
+            return app.routing.apply(args.egress_id, args.confirm_apply, args.plan_id)
+        if action == "delete":
+            return app.routing.delete(args.egress_id, args.confirm_delete, args.plan_id)
         return getattr(app.routing, action)(args.egress_id)
     if cmd == "ipv6":
         if action == "list":
@@ -569,6 +672,12 @@ def dispatch(args, app):
                 ],
                 "routing_journals": [
                     p.name for p in (app.paths.state / "routing-journals").glob("*.json")
+                ],
+                "network_journals": [
+                    p.name for p in (app.paths.state / "network-journals").glob("*.json")
+                ],
+                "pbr_migrations": [
+                    p.name for p in (app.paths.state / "pbr-migrations").glob("*.json")
                 ],
             }
         from .core.migration import Migration

@@ -72,7 +72,19 @@ def environment():
         "systemd": Path("/run/systemd/system").is_dir(),
         "tools": {
             tool: shutil.which(tool)
-            for tool in ("ip", "ss", "wg", "wg-quick", "realm", "ssh", "systemctl", "mimic")
+            for tool in (
+                "ip",
+                "ss",
+                "wg",
+                "wg-quick",
+                "realm",
+                "ssh",
+                "systemctl",
+                "systemd-run",
+                "networkctl",
+                "netplan",
+                "mimic",
+            )
         },
     }
 

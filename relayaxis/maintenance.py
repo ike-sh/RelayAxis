@@ -25,6 +25,8 @@ def _uninstall(paths, purge=False):
     if manifest["prefix"] != str(prefix) or not (prefix / ".relayaxis-owned").is_file():
         raise ConflictError("安装清单的程序目录不匹配")
     store = Store(paths.database)
+    if any((paths.state / "pbr-migrations").glob("*.json")):
+        raise ConflictError("存在未完成的 PBR 迁移；先完成恢复与依赖收敛")
     live = paths.root.resolve() == Path("/")
     services = Services(Runner())
     if live:
@@ -42,9 +44,16 @@ def _uninstall(paths, purge=False):
         Migration(app).recover()
     units = set(manifest["units"])
     with store.connect() as db:
-        entries = db.execute("SELECT key,data FROM runtime").fetchall()
-    for entry in entries:
-        key, data = entry[0], json.loads(entry[1])
+        rows = db.execute("SELECT key,data FROM runtime").fetchall()
+    entries = [(row[0], json.loads(row[1])) for row in rows]
+    native_persistence = {
+        key: data for key, data in entries if key.startswith("persistence:") and data.get("path")
+    }
+    if purge and native_persistence:
+        raise ConflictError(
+            "完全清理前需用 egress delete 的 plan-id 流程移除自建 Netplan/networkd 片段"
+        )
+    for key, data in entries:
         if key.startswith("deployment:"):
             units.update(f"relayaxis-realm-{endpoint_id}.service" for endpoint_id in data)
         if key.startswith(("wg:", "pbr-unit:", "mimic-owned:")) and data.get("unit"):

@@ -82,6 +82,41 @@ class State(StrEnum):
     OUT_OF_SYNC = "OUT_OF_SYNC"
 
 
+class EgressManagement(StrEnum):
+    """The owner allowed to change an IPv4 egress.
+
+    ``managed`` existed in v0.1.0 and remains in the serialized model.  The
+    explicit value is the v0.1.1 source of truth after validation.
+    """
+
+    SYSTEM = "system"
+    EXTERNAL = "external"
+    RELAYAXIS = "relayaxis"
+
+
+class PersistenceBackend(StrEnum):
+    SYSTEM = "system"
+    EXTERNAL = "external"
+    AUTO = "auto"
+    NETPLAN = "netplan"
+    NETWORKD = "networkd"
+    LEGACY_ONESHOT = "legacy-oneshot"
+    READ_ONLY = "read-only"
+
+
+class EgressHealth(StrEnum):
+    HEALTHY = "HEALTHY"
+    DEGRADED = "DEGRADED"
+    ROUTE_MISSING = "ROUTE_MISSING"
+    RULE_MISSING = "RULE_MISSING"
+    SOURCE_MISSING = "SOURCE_MISSING"
+    WRONG_INTERFACE = "WRONG_INTERFACE"
+    WRONG_GATEWAY = "WRONG_GATEWAY"
+    WRONG_TABLE = "WRONG_TABLE"
+    UNREACHABLE = "UNREACHABLE"
+    UNKNOWN = "UNKNOWN"
+
+
 @dataclass
 class Binding:
     listen_address: str
@@ -180,6 +215,8 @@ class Egress:
     managed: bool = False
     dependency_service: str = ""
     revision: int = 0
+    management: str = ""
+    backend: str = ""
 
     def validate(self):
         if type(self.managed) is not bool:
@@ -193,6 +230,27 @@ class Egress:
         self.table = str(self.table)
         if self.table != "main" and (not self.table.isdigit() or not 1 <= int(self.table) < 2**32):
             raise ValidationError("路由表使用 main 或数字 ID")
+        # v0.1.0 compatibility is deliberately one-way and conservative:
+        # managed=true was RelayAxis-owned; managed=false main was the system
+        # default; every other managed=false record remains external.
+        if not self.management:
+            self.management = (
+                EgressManagement.RELAYAXIS
+                if self.managed
+                else (
+                    EgressManagement.SYSTEM if self.table == "main" else EgressManagement.EXTERNAL
+                )
+            ).value
+        if self.management not in {item.value for item in EgressManagement}:
+            raise ValidationError("管理方式必须是 system、external 或 relayaxis")
+        expected_managed = self.management == EgressManagement.RELAYAXIS
+        if self.managed and not expected_managed:
+            raise ValidationError("managed 与 management 的资源所有权冲突")
+        self.managed = expected_managed
+        if self.management == EgressManagement.SYSTEM and (
+            self.table != "main" or self.priority or self.dependency_service
+        ):
+            raise ValidationError("系统默认出口必须复用 main 表且不能依赖独立 PBR 服务")
         if self.managed and (
             self.table == "main"
             or int(self.table) in (253, 254, 255)
@@ -206,6 +264,41 @@ class Egress:
             r"[a-zA-Z0-9_.@-]+\.service", self.dependency_service
         ):
             raise ValidationError("无效的 PBR 服务名")
+        if not self.backend:
+            if self.management == EgressManagement.SYSTEM:
+                self.backend = PersistenceBackend.SYSTEM
+            elif self.management == EgressManagement.EXTERNAL:
+                self.backend = PersistenceBackend.EXTERNAL
+            elif self.dependency_service.startswith("relayaxis-pbr-"):
+                self.backend = PersistenceBackend.LEGACY_ONESHOT
+            else:
+                self.backend = PersistenceBackend.AUTO
+            self.backend = self.backend.value
+        if self.backend not in {item.value for item in PersistenceBackend}:
+            raise ValidationError("未知的出口持久化后端")
+        allowed = {
+            EgressManagement.SYSTEM: {PersistenceBackend.SYSTEM},
+            EgressManagement.EXTERNAL: {
+                PersistenceBackend.EXTERNAL,
+                PersistenceBackend.NETPLAN,
+                PersistenceBackend.NETWORKD,
+                PersistenceBackend.LEGACY_ONESHOT,
+                PersistenceBackend.READ_ONLY,
+            },
+            EgressManagement.RELAYAXIS: {
+                PersistenceBackend.AUTO,
+                PersistenceBackend.NETPLAN,
+                PersistenceBackend.NETWORKD,
+                PersistenceBackend.LEGACY_ONESHOT,
+            },
+        }
+        if PersistenceBackend(self.backend) not in allowed[EgressManagement(self.management)]:
+            raise ValidationError("管理方式与持久化后端不匹配")
+        if (
+            self.backend in (PersistenceBackend.NETPLAN, PersistenceBackend.NETWORKD)
+            and self.dependency_service
+        ):
+            raise ValidationError("原生网络后端不能依赖旧 PBR oneshot 服务")
         return self
 
 

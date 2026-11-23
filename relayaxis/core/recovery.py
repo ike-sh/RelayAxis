@@ -47,6 +47,24 @@ class Backups:
                         files["config/" + path.relative_to(self.paths.config).as_posix()] = (
                             path.read_bytes()
                         )
+                for egress in self.store.list("egress"):
+                    runtime = self.store.runtime("persistence:" + egress["egress_id"], {})
+                    if not runtime:
+                        continue
+                    path = Path(runtime.get("path", ""))
+                    roots = (self.paths.netplan.resolve(), self.paths.networkd.resolve())
+                    try:
+                        resolved = path.resolve()
+                        if not any(resolved.is_relative_to(root) for root in roots):
+                            raise ValidationError("原生网络配置所有权路径越界")
+                    except OSError as exc:
+                        raise ValidationError("原生网络配置路径异常") from exc
+                    if path.is_symlink() or not path.is_file():
+                        raise ValidationError("登记的原生网络配置缺失或不是普通文件")
+                    raw = path.read_bytes()
+                    if hashlib.sha256(raw).hexdigest() != runtime.get("sha256"):
+                        raise ValidationError("登记的原生网络配置已漂移，先审计再备份")
+                    files[f"network/{egress['egress_id']}/{path.name}"] = raw
                 manifest = {
                     "schema": 1,
                     "version": __version__,
@@ -86,7 +104,7 @@ class Backups:
                 if member.name not in (
                     "manifest.json",
                     "state.sqlite3",
-                ) and not member.name.startswith("config/"):
+                ) and not member.name.startswith(("config/", "network/")):
                     raise ValidationError("备份含有非受管成员")
                 size += member.size
                 if size > MAX_BACKUP_BYTES:
@@ -203,6 +221,10 @@ class Backups:
             "restored_desired_state": True,
             "backup_version": manifest["version"],
             "safety_backup": safety["backup"],
+            "native_network_snapshots": sorted(
+                name for name in files if name.startswith("network/")
+            ),
+            "native_network_applied": False,
             "next": "核验 egress / wg 后运行 ra sync reconcile；尚未改变运行中服务",
         }
 

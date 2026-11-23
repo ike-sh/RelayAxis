@@ -1,6 +1,6 @@
 # RelayAxis
 
-基于 **Realm + WireGuard** 的 Linux 多入口、多 IPv4 出口中转管理工具。版本 **0.1.0**，MIT 许可，Python 标准库实现，简体中文终端菜单，全局命令 `ra`。
+基于 **Realm + WireGuard** 的 Linux 多入口、多 IPv4 出口中转管理工具。版本 **0.1.1**，MIT 许可，Python 标准库实现，简体中文终端菜单，全局命令 `ra`。
 
 项目处于首版验证阶段。已实现管理与执行代码；实际通过和跳过的测试、需要服务器验证的项目见 [验证记录](docs/validation.md)。不要将离线编排测试视为公网组网验收。
 
@@ -8,13 +8,14 @@
 
 - **Ingress** 决定客户端从哪些 IPv6 地址、哪些 IPv4 前置机进入；一条逻辑规则可以有多个入口和不同公网端口。
 - **Transport** 使用每台前置机独立的 WG 隧道。NAT 侧 Controller 主动连接公网 Ingress，默认保活 25 秒。只安装 peer `/32` 路由，不导入全局默认路由。
-- **Egress** 指定到最终落地的 IPv4 源地址、接口、网关和路由表。应用前同时核对普通源地址路由与绑定接口的路由。域名在应用时解析并固定为 IPv4。
+- **Egress** 从内核地址、main 默认路由、metric、策略 rule 和各表 default route 识别真实出口，不用网卡名或运营商标签猜测。应用前同时核对普通源地址路由与绑定接口的路由。域名在应用时解析并固定为 IPv4。
 - 完整规则增删改查、启停、复制、搜索、批量操作、版本历史、单条回滚、映射表、规则导入导出。
 - 每个监听端点一个 Realm 进程和 systemd 单元。更改单条规则只操作该规则所属单元；两层 Realm 均支持 TCP、UDP 和 TCP+UDP。
 - SQLite 保存期望配置、运行版本和历史；文件原子替换、进程锁、应用前备份、持久恢复日志、失败补偿。
 - Controller 通过 **SSH over WG** 下发完整专属快照。Ingress 限定可用监听地址、端口范围、WG 目标、网卡和固定启动依赖；只返回实际应用版本。
 - 只读发现外部 Realm、源地址 PBR、IPv6 地址与现有 DDNS 服务。导入默认禁用并保留外部服务，显式受控迁移另有命令。
-- 自建 PBR 使用独立路由表和 `proto 186`；外部 PBR 只读复用。
+- 出口所有权明确区分 `system`、`external`、`relayaxis`。系统默认与外部 PBR 只读复用；自建 PBR 优先写入独立 Netplan YAML，原生 networkd 使用当前生效 `.network` 的 drop-in，不再新建 oneshot。
+- 自建网络应用必须先取得 `plan-id`，通过独立 systemd 回滚计时器保护 `netplan apply`，再核验 main 默认路由、SSH 对端选路和实际内核 PBR。定时收敛只定向重配所属接口。
 - 网络诊断、源地址 TCP/UDP 探测、TCP minRTT 采样、服务日志、Mimic 本端可选管理及双端状态核验。
 
 **不会管理防火墙、修改 SSH 全局配置、替换内核、调整 TCP 参数、重写系统默认路由或接管官方 IPv6/DDNS。** 需要的业务端口和 WG/SSH 可达性由管理员现有网络策略保证。
@@ -46,7 +47,7 @@ sudo ra doctor --json
 
 详细可执行步骤见 [Controller / Ingress 部署](docs/deployment.md)，示例 JSON 见 [examples](examples)。**示例使用文档专用地址，必须替换成本机参数。**
 
-1. Controller 运行 `ra egress discover`，将所需出口保存为命名记录。已有表 108、优先级 18080、`ipv4-eth1-pbr.service` 可以按实际参数复用，`managed` 设置为 `false`。
+1. Controller 运行 `ra egress discover`，确认唯一的 `is_default` 和其他 source-policy 出口，再给线路设置自定义名称。main 默认出口保存为 `management: system`；已有 Netplan/networkd PBR 保存为 `management: external`。旧 oneshot 先运行 `ra egress migrate ID` 只读审计，不把它冒充为原生持久化。
 2. 两端分别 `ra wg create --file ...`，各自产生本机私钥；互换 `wg export` 的公开配对包，分别 `wg pair` 和 `wg apply`。
 3. Ingress 配置 `agent configure` 授权范围，在现有 `authorized_keys` 中追加生成的受限同步密钥授权行。
 4. Controller 核验 SSH 主机指纹，将前置机记录中的专用私钥路径、known_hosts、隧道 ID 配置正确。
@@ -60,7 +61,18 @@ sudo ra doctor --json
 sudo ra status --json
 sudo ra egress discover
 sudo ra egress add --file examples/egress-main.json
+sudo ra egress health
+sudo ra egress backend line-main
 sudo ra egress check line-main 192.0.2.80 443 --protocol both
+# RelayAxis 自建非默认出口：先预览，再提交同一计划
+sudo ra egress plan line-managed
+sudo ra egress apply line-managed --confirm-apply --plan-id PLAN_ID
+# 删除自建原生片段同样分为预览和确认
+sudo ra egress delete line-managed
+sudo ra egress delete line-managed --confirm-delete --plan-id DELETE_PLAN_ID
+# v0.1.0 旧 oneshot：先审计/预览，再显式迁移
+sudo ra egress migrate OLD_ID
+sudo ra egress migrate OLD_ID --confirm-migrate --plan-id PLAN_ID
 sudo ra ipv6 list
 sudo ra realm scan                         # 只读，不停止任何现有服务
 sudo ra realm import --service realm-old.service --egress line-main
@@ -108,7 +120,7 @@ sudo bash uninstall.sh                      # 删除本工具及自己的服务�
 sudo bash uninstall.sh --purge --confirm-purge
 ```
 
-卸载按登记清单操作，不按 `realm*`、`wg*` 等宽泛匹配删除。外部 Realm、PBR、官方 IPv6 管理器和既有 DDNS 服务均保留。备份包含本机私钥，文件为 0600，需通过管理员现有的加密备份方式异地保存。
+卸载按登记清单操作，不按 `realm*`、`wg*` 等宽泛匹配删除。普通卸载保留数据库以及 RelayAxis 已提交的 Netplan/networkd 片段，避免卸载程序时同步撤掉正在使用的出口；重装后可继续按原所有权管理。完全清理前需逐个执行 `egress delete` 的预览与 `plan-id` 确认流程，仍有自建原生片段或未完成 PBR 迁移时会保留数据并提示先收敛。外部 Realm、PBR、官方 IPv6 管理器和既有 DDNS 服务均保留。备份包含本机私钥，文件为 0600，需通过管理员现有的加密备份方式异地保存。
 
 ## 开发与测试
 
@@ -126,13 +138,16 @@ RELAYAXIS_REALM=/tmp/realm python3 -m unittest discover -v
 # 隔离 network namespace + 真实 WireGuard/PBR 测试：
 sudo env RELAYAXIS_NETNS=1 RELAYAXIS_REALM=/tmp/realm \
     python3 -m unittest tests.integration.test_netns -v
+# 真实 Netplan generate + 隔离 networkd 停止/重启恢复：
+sudo env RELAYAXIS_NETPLAN=1 RELAYAXIS_NETWORKD_NETNS=1 \
+    python3 -m unittest tests.integration.test_persistence_live -v
 ```
 
 实际网络用例会明确跳过缺失的 Realm、root、namespace 或 WG 内核条件。测试使用隔离目录和专用 namespace，不部署生产服务器。CI 覆盖跨平台纯逻辑、真实 Realm 数据流与 Linux 特权集成测试。
 
 ## 首版限制
 
-- 已在 CI 通过原生 WG 与双 PBR namespace 数据流测试；尚未完成干净 Debian 13 实机安装、重启、跨公网 NAT 或双端 Mimic 验收；见 [验证记录](docs/validation.md)。
+- 已通过真实 Netplan 生成和隔离 networkd 进程停止/重启后的 rule、table 与 `route get` 恢复测试，也保留原生 WG 与双 PBR namespace 数据流回归；尚未把这些隔离结果当作 Debian 13 物理双出口、整机重启或公网 NAT 验收，见 [验证记录](docs/validation.md)。
 - 分布式应用没有全局原子提交。前置机失败时保留本机旧/新内部监听，其他前置机与 IPv6 可继续运行，状态显示部分成功。全部确认后才清理旧监听。
 - 每条被修改规则可能短暂中断自己的现有连接；不承诺无损重载或迁移既有 TCP/UDP 会话。
 - 每个物理网卡首版只管理一个 Mimic 实例；通过两端独立控制台启停，再用 `mimic verify` 核验。不经唯一 WG 管理链路盲目自动切换。

@@ -2,12 +2,14 @@ import copy
 import json
 import tempfile
 import unittest
+from dataclasses import asdict
 from pathlib import Path
 
 from relayaxis.core.network import Network
 from relayaxis.core.routing import Routing
 from relayaxis.core.system import Result
-from relayaxis.errors import ApplyError, ConflictError, SystemError
+from relayaxis.errors import ApplyError, ConflictError, SystemError, ValidationError
+from relayaxis.models import Egress
 
 from .helpers import FakeRunner, Lab
 
@@ -91,8 +93,11 @@ class RoutingTests(unittest.TestCase):
             "table": "108",
             "priority": 18080,
             "managed": True,
+            "dependency_service": "relayaxis-pbr-owned.service",
         }
-        self.routing.save(self.data)
+        legacy = Egress(**self.data).validate()
+        self.lab.store.put("egress", "owned", asdict(legacy), 0)
+        self.lab.store.set_runtime("pbr-unit:owned", {"unit": legacy.dependency_service})
 
     def test_owned_pbr_is_idempotent_and_repairs_only_missing_entry(self):
         self.routing.activate("owned")
@@ -139,5 +144,20 @@ class RoutingTests(unittest.TestCase):
 
     def test_external_egress_apply_does_not_touch_routes(self):
         self.runner.calls.clear()
-        self.assertEqual(self.routing.apply("line-a")["state"], "EXTERNAL")
+        self.assertEqual(self.routing.apply("line-a")["state"], "SYSTEM")
         self.assertEqual(self.runner.calls, [])
+
+    def test_native_egress_cannot_use_legacy_kernel_activate_path(self):
+        native = Egress(
+            "native",
+            "原生后端",
+            "eth1",
+            "10.8.0.212",
+            "10.8.0.1",
+            "109",
+            18081,
+            managed=True,
+        ).validate()
+        self.lab.store.put("egress", "native", asdict(native), 0)
+        with self.assertRaises(ValidationError):
+            self.routing.activate("native")

@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import tarfile
@@ -84,3 +85,22 @@ class BackupTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.backups.import_rules(destination, self.lab.rules)
         self.assertEqual(self.lab.rules.get(rule["rule_id"])["revision"], 1)
+
+    def test_native_network_snapshot_is_archived_but_not_applied_on_restore(self):
+        path = self.lab.paths.netplan / "90-relayaxis-egress-line-a.yaml"
+        path.parent.mkdir(parents=True)
+        raw = b"# Managed by RelayAxis; egress=line-a\n"
+        path.write_bytes(raw)
+        self.lab.store.set_runtime(
+            "persistence:line-a",
+            {
+                "backend": "netplan",
+                "path": str(path),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            },
+        )
+        backup = self.backups.create()
+        _, files = self.backups.inspect(backup["backup"])
+        self.assertIn("network/line-a/90-relayaxis-egress-line-a.yaml", files)
+        result = self.backups.restore(backup["backup"])
+        self.assertFalse(result["native_network_applied"])

@@ -31,7 +31,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - run: sudo apt-get update && sudo apt-get install -y iproute2 wireguard-tools iputils-ping
+      - run: sudo apt-get update && sudo apt-get install -y iproute2 wireguard-tools iputils-ping netplan.io systemd
       - run: python -m relayaxis.fetch_realm /tmp/relayaxis-ci-realm
       - name: Real Realm TCP, UDP and IPv6
         env:
@@ -39,3 +39,5 @@ jobs:
         run: python -m unittest tests.integration.test_realm_live -v
       - name: Isolated namespaces, native WG and source PBR
         run: sudo env RELAYAXIS_NETNS=1 RELAYAXIS_REALM=/tmp/relayaxis-ci-realm python3 -m unittest tests.integration.test_netns -v
+      - name: Real Netplan generation and isolated networkd restart persistence
+        run: sudo env RELAYAXIS_NETPLAN=1 RELAYAXIS_NETWORKD_NETNS=1 python3 -m unittest tests.integration.test_persistence_live -v

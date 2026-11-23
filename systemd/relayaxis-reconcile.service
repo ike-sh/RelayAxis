@@ -7,6 +7,8 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStartPre=/usr/local/bin/ra --json recovery repair
+ExecStartPre=-/usr/local/bin/ra --json egress reconcile
 ExecStart=/usr/local/bin/ra --json sync reconcile
+ExecStartPost=-/usr/local/bin/ra --json recovery repair
 TimeoutStartSec=600
 UMask=0077
